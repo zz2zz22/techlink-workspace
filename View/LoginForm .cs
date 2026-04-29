@@ -10,6 +10,7 @@ using System.Windows.Forms;
 using techlink_workspace.Controller;
 using techlink_workspace.Controller.UI;
 using techlink_workspace.Model;
+using techlink_workspace.View;
 
 namespace techlink_workspace
 {
@@ -72,10 +73,12 @@ namespace techlink_workspace
         private string _currentLang = "EN";
 
         // ── Constructor ───────────────────────────────────────
+
         public LoginForm()
         {
             BuildUI();
             ApplyLanguage(_currentLang);
+            this.FormClosed += (s, e) => Environment.Exit(0);
         }
 
         // ── Build UI ──────────────────────────────────────────
@@ -296,14 +299,10 @@ namespace techlink_workspace
             switch (loginResult)
             {
                 case LoginController.LoginResult.Success:
-                    // Store session / pass user to main form
                     AppSession.CurrentUser = loggedInUser;
-                    //var mainForm = new MainForm();   // swap with your real main form
-                    //mainForm.Show();
+                    var dashboard = new Dashboard();
+                    dashboard.Show();
                     this.Hide();
-                    CTMessageBox.Show(
-                        $"Login success: {loggedInUser.User_fullName} - {loggedInUser.User_code}",
-                        "Success", MessageBoxButtons.OK, MessageBoxIcon.Information);
                     break;
 
                 case LoginController.LoginResult.InvalidCredentials:
