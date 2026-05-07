@@ -74,7 +74,7 @@ namespace techlink_workspace.View
 
             lblAppTitle = new Label
             {
-                Text = "techlink workspace",
+                Text = "Tech-link Workspace",
                 Font = new Font("Segoe UI", 11f, FontStyle.Bold),
                 ForeColor = Color.FromArgb(33, 33, 33),
                 AutoSize = true,
@@ -86,8 +86,7 @@ namespace techlink_workspace.View
             int iconY = 14;
             int rightStart = pnlHeader.Width - 16;   // anchored dynamically in Resize
 
-            btnSearch = MakeIconButton("&#128269;", "Search");
-            btnHelp = MakeIconButton("?", "Help");
+
 
             // Notification with badge
             btnNotification = MakeIconButton("&#128276;", "Notifications");
@@ -99,7 +98,6 @@ namespace techlink_workspace.View
                 BackColor = Color.FromArgb(220, 53, 69),
                 Size = new Size(16, 16),
                 TextAlign = ContentAlignment.MiddleCenter,
-                //BackColor = Color.FromArgb(220, 53, 69)
             };
             lblNotifBadge.Region = System.Drawing.Region.FromHrgn(
                 CreateRoundRectRgn(0, 0, 16, 16, 8, 8));
@@ -139,7 +137,6 @@ namespace techlink_workspace.View
             pnlHeader.Controls.AddRange(new Control[]
             {
                 picLogo, lblAppTitle,
-                btnSearch, btnHelp, btnNotification, lblNotifBadge,
                 pnlUserArea
             });
             this.Controls.Add(pnlHeader);
@@ -157,15 +154,6 @@ namespace techlink_workspace.View
 
             pnlUserArea.Location = new Point(right - pnlUserArea.Width, 10);
             right = pnlUserArea.Left - 8;
-
-            btnNotification.Location = new Point(right - 36, iconY);
-            lblNotifBadge.Location = new Point(btnNotification.Left + 18, iconY - 2);
-            right = btnNotification.Left - 4;
-
-            btnHelp.Location = new Point(right - 36, iconY);
-            right = btnHelp.Left - 4;
-
-            btnSearch.Location = new Point(right - 36, iconY);
         }
 
         private Button MakeIconButton(string text, string tooltip)
