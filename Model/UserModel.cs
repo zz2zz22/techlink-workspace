@@ -1,10 +1,4 @@
-﻿using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Text;
-using System.Threading.Tasks;
-
-namespace techlink_workspace.Model
+﻿namespace techlink_workspace.Model
 {
     public class UserModel
     {
@@ -12,7 +6,8 @@ namespace techlink_workspace.Model
         public string User_code { get; set; }
         public string User_fullName { get; set; }
         public string User_password { get; set; }
-        public int User_type { get; set; }
+        public string User_type { get; set; }   // nvarchar(50) — stores UserType ID
         public int User_status { get; set; }
+        public int? User_permissionLevel { get; set; }   // 1=Admin, 2=Manager, 3=Normal
     }
 }

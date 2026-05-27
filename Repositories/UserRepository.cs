@@ -1,11 +1,6 @@
-﻿using org.omg.PortableInterceptor;
-using System;
-using System.Collections.Generic;
+﻿using System;
 using System.Data;
 using System.Data.SqlClient;
-using System.Linq;
-using System.Text;
-using System.Threading.Tasks;
 using techlink_workspace.Data;
 using techlink_workspace.Model;
 
@@ -13,24 +8,22 @@ namespace techlink_workspace.Repositories
 {
     public class UserRepository
     {
-        private readonly SqlSoft _db = new SqlSoft();
-
         /// <summary>
-        /// Returns the matched user row or null if not found / inactive.
-        /// Password comparison is done in SQL to avoid pulling hashes to client.
+        /// Authenticates and returns the user including the new permissionLevel.
+        /// User_type is now nvarchar(50) storing a UserType ID string.
         /// </summary>
         public UserModel GetByCredentials(string userCode, string password)
         {
-            // Use parameterised query — never string-concatenate credentials
-            string sql = @"
+            const string sql = @"
                 SELECT TOP 1
-                    User_id, User_code, User_fullName,
-                    User_password, User_type, User_status
-                FROM dbo.Sys_User
-                WHERE (User_code = @code OR User_id = @code)
-                  AND User_password = @pwd
-                  AND User_status = 1";
-            //1 = active
+                    u.User_id, u.User_code, u.User_fullName,
+                    u.User_password, u.User_type, u.User_status,
+                    u.User_permissionLevel
+                FROM dbo.Sys_User u
+                WHERE (u.User_code = @code OR u.User_id = @code)
+                  AND u.User_password = @pwd
+                  AND u.User_status = 1";
+
             try
             {
                 var conn = DatabaseUtils.GetDBConnection();
@@ -40,7 +33,6 @@ namespace techlink_workspace.Repositories
                 {
                     cmd.Parameters.Add("@code", SqlDbType.NVarChar, 50).Value = userCode;
                     cmd.Parameters.Add("@pwd", SqlDbType.VarChar, 50).Value = password;
-                    // NOTE: replace raw password with hashed value (e.g. SHA-256) when ready
 
                     using (var rdr = cmd.ExecuteReader())
                     {
@@ -52,15 +44,17 @@ namespace techlink_workspace.Repositories
                             User_code = rdr["User_code"].ToString(),
                             User_fullName = rdr["User_fullName"].ToString(),
                             User_password = rdr["User_password"].ToString(),
-                            User_type = Convert.ToInt32(rdr["User_type"]),
-                            User_status = Convert.ToInt32(rdr["User_status"])
+                            User_type = rdr["User_type"].ToString(),   // nvarchar(50)
+                            User_status = Convert.ToInt32(rdr["User_status"]),
+                            User_permissionLevel = rdr["User_permissionLevel"] == DBNull.Value
+                                                   ? (int?)null
+                                                   : Convert.ToInt32(rdr["User_permissionLevel"])
                         };
                     }
                 }
             }
             catch (SqlException ex)
             {
-                // bubble up so controller can handle / log
                 throw new Exception("DB error during login: " + ex.Message, ex);
             }
         }
