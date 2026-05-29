@@ -2,9 +2,9 @@
 using System.Collections.Generic;
 using System.Data;
 using System.Drawing;
+using System.IO;
 using System.Linq;
 using System.Text;
-using System.IO;
 using System.Windows.Forms;
 using Excel = Microsoft.Office.Interop.Excel;
 using techlink_workspace.Controller.UI;
@@ -15,87 +15,119 @@ namespace techlink_workspace.View.Invoice
 {
     public class InvoiceForm : Form
     {
-        // ── State ────────────────────────────────────────────────────────
         private readonly UserModel _user;
         private readonly InvoiceRepository _repo = new InvoiceRepository();
         private DataTable _fullData;
 
-        // Permission: level 1=Admin, 2=Manager, 3=Normal
         private int Level => _user.User_permissionLevel ?? 3;
-        private bool CanEdit => Level <= 2;
-        private bool CanExport => Level <= 1;
-        private bool CanDelete => Level <= 1;
-        private bool CanImport => Level == 1;   // admin only
+        private bool CanImport => Level == 1;
+        private bool CanDelete => Level == 1;
+        private bool CanHistory => Level <= 2;
+        private bool CanExport => Level <= 2;
+        private bool CanSettings => Level <= 2;
 
-        /// <summary>
-        /// Determines which sections the user can edit based on User_type name.
-        /// "Logistic" → plan section only.
-        /// "Custom"   → customs section only.
-        /// Admin (level 1) or Manager (level 2) → all.
-        /// </summary>
-        private InvoiceEditScope GetEditScope()
-        {
-            if (Level == 1) return InvoiceEditScope.All;
-            string t = (_user.User_type ?? "").ToLower();
-            if (t.Contains("custom")) return InvoiceEditScope.CustomOnly;
-            if (t.Contains("logistic")) return InvoiceEditScope.LogisticPlan;
-            return InvoiceEditScope.All;   // manager or unrecognised → all
-        }
+        private InvoiceEditScope GetScope() =>
+            Level == 1 ? InvoiceEditScope.All :
+            Level == 2 ? InvoiceEditScope.ErpLocked :
+                         InvoiceEditScope.LevelThree;
 
-        // ── Toolbar row 1 ────────────────────────────────────────────────
-        private Button btnImportExcel, btnAdd, btnEdit, btnDelete,
-                       btnHistory, btnExportCSV, btnExportExcel, btnRefresh;
+        // ── Toolbar ───────────────────────────────────────────────────────
+        private Button btnImport, btnEdit, btnDelete,
+                       btnHistory, btnExportCSV, btnExportExcel,
+                       btnSettings, btnRefresh;
 
-        // ── Toolbar row 2 – filter bar ───────────────────────────────────
-        private ComboBox cmbFwd, cmbContType, cmbEmployee, cmbFeeStatus;
-        private ComboBox cmbGroupCol, cmbGroupVal;
-        private ComboBox cmbSearchCol;
+        // ── Filter bar ────────────────────────────────────────────────────
+        private ComboBox cmbFwd, cmbContType, cmbStatus,
+                               cmbGroupCol, cmbGroupVal, cmbSearchCol;
         private TextBox txtKeyword;
         private DateTimePicker dtpFrom, dtpTo;
         private CheckBox chkDate;
         private Button btnSearch, btnClear;
 
-        // ── Grid + status ────────────────────────────────────────────────
         private DataGridView dgv;
         private Label lblStatus;
 
-        // ── Friendly column headers ──────────────────────────────────────
+        // ── Column headers ────────────────────────────────────────────────
         private static readonly Dictionary<string, string> HEADERS =
-            new Dictionary<string, string>
-        {
-            {"Invoice_Id","ID"},{"Invoice_no","Invoice No"},
-            {"Invoice_erpID","ERP ID"},{"Invoice_erpInvoiceNo","ERP Inv No"},
-            {"Invoice_shippingTerm","Ship Term"},{"Invoice_paymentTerm","Pay Term"},
-            {"Invoice_employee","Employee"},{"Invoice_logisticRemark","Remark"},
-            {"Invoice_confirmDate","Confirm Date"},{"Invoice_fwdName","FWD"},
-            {"Invoice_bookingNo","Booking No"},{"Invoice_contType","Cont Type"},
-            {"Invoice_vgmCO","VGM C/O"},{"Invoice_cyCO","CY C/O"},
-            {"Invoice_etd","ETD"},{"Invoice_eta","ETA"},
-            {"Invoice_billType","Bill Type"},{"Invoice_billNo","Bill No"},
-            {"Invoice_co","C/O"},{"Invoice_coNo","C/O No"},
-            {"Invoice_OF","OF"},{"Invoice_deliveryCharges","Delivery"},
-            {"Invoice_taxes","Taxes"},{"Invoice_otherDestCharges","Other Dest"},
-            {"Invoice_thc","THC"},{"Invoice_blFee","B/L Fee"},
-            {"Invoice_seal","Seal"},{"Invoice_telexRelease","Telex"},
-            {"Invoice_cfs","CFS"},{"Invoice_vgmFee","VGM Fee"},
-            {"Invoice_ensebsams","ENS/EBS/AMS"},{"Invoice_other","Other"},
-            {"Invoice_totalVND","Total VND"},{"Invoice_subTotalOcean","SubTotal Ocean USD"},
-            {"Invoice_coFee","C/O Fee"},{"Invoice_feeStatus","Fee Status"},
-            {"Invoice_redInvoiceNo","Red Inv No"},{"Invoice_redInvoiceDate","Red Inv Date"},
-            {"Invoice_redInvoiceRecvDate","Red Inv Recv"},
-            {"Invoice_transferAccountDate","Transfer Acct"},
-            {"Invoice_trucking","Trucking"},{"Invoice_infrastructureFee","Infra Fee"},
-            {"Invoice_customerClearance","Cust Clear"},{"Invoice_customFee","Custom Fee"},
-            {"Invoice_otherCustomFee","Other Custom"},
-            {"Invoice_subTotalVNDCustom","SubTotal VND Custom"},
-            {"Invoice_subTotalUSDCustom","SubTotal USD Custom"},
-            {"Invoice_grandTotalVND","Grand Total VND"},
-            {"Invoice_grandTotalUSD","Grand Total USD"},
-            {"Invoice_cdsNo","CDS No"},{"Invoice_cdsDate","CDS Date"},
-            {"Invoice_line","Line"},{"Invoice_customType","Custom Type"},
-            {"createdate","Created"},{"createby","Created By"},
-            {"updatedate","Updated"},{"updateby","Updated By"},
-        };
+    new Dictionary<string, string>
+{
+    // ── Identity ──────────────────────────────────────────────────
+    {"Invoice_Id",                   "ID"},
+    {"Invoice_no",                   "ERP Invoice No"},      // row 27
+    // ── ERP (rows 1-14 + brand row 6) ────────────────────────────
+    {"Invoice_customerCode",         "Customer Code"},               // 1
+    {"Invoice_customerName",         "Customer Name"},      // 2
+    {"Invoice_customerRequestDate",  "Request Date"},     // 3
+    {"Invoice_poNo",                 "PO Number"},              // 4
+    {"Invoice_poDate",               "PO Date"},            // 5
+    {"Invoice_brand",                "Brand"},             // 6  
+    {"Invoice_saleName",             "Sale Name"},                 // 7
+    {"Invoice_factoryNo",            "Factory Number"},            // 8
+    {"Invoice_factoryName",          "Factory Name"},           // 9
+    {"Invoice_itemCode",             "Item Code"},                // 10
+    {"Invoice_itemCodeCustomers",    "Customer Item Code"},             // 11
+    {"Invoice_itemName",             "Item Name"},               // 12
+    {"Invoice_quantity",             "Quantity"},          // 13
+    {"Invoice_unit",                 "Unit"},                  // 14
+    // ── Logistics Plan (rows 15-31) ───────────────────────────────
+    {"Invoice_shippingTerm",         "Shipping Term"},        // 15
+    {"Invoice_paymentTerm",          "Payment Term"},         // 16
+    {"Invoice_logisticPersonInCharge","NV Logistics PIC"},   // 16
+    {"Invoice_logisticNote",         "NOTE"},                 // 17
+    {"Invoice_factoryConfirmDate",   "Factory Confirm Date"}, // 18
+    {"Invoice_shippingStatus",       "Status"},               // 19
+    {"Invoice_fwdName",              "FWD Name"},             // 20
+    {"Invoice_bookingNo",            "Book Number"},          // 21
+    {"Invoice_contType",             "Type (Cont)"},          // 22
+    {"Invoice_vgmCO",                "SI & VGM cut-off"},    // 23
+    {"Invoice_cyCO",                 "CY cut-off"},          // 24
+    {"Invoice_etd",                  "ETD"},                  // 25
+    {"Invoice_eta",                  "ETA"},                  // 26
+    {"Invoice_billType",             "Type of Bill"},         // 28
+    {"Invoice_billNo",               "Bill Number"},          // 29
+    {"Invoice_co",                   "CO: Yes/No"},          // 30
+    {"Invoice_coNo",                 "CO Number"},            // 31
+    // ── Ocean Charges (rows 32-46) ────────────────────────────────
+    {"Invoice_OF",                   "OF"},                   // 32
+    {"Invoice_deliveryCharges",      "Delivery Charges"},     // 33
+    {"Invoice_taxes",                "Duty/Taxes"},           // 34
+    {"Invoice_otherDestCharges",     "Other Dest Charges"},   // 35
+    {"Invoice_thc",                  "THC"},                  // 36
+    {"Invoice_blFee",                "b/l fee"},              // 37
+    {"Invoice_seal",                 "Seal"},                 // 38
+    {"Invoice_telexRelease",         "Telex Release"},        // 39
+    {"Invoice_cfs",                  "CFS"},                  // 40
+    {"Invoice_vgmFee",               "VGM"},                  // 41
+    {"Invoice_ensebsams",            "ENS/EBS/AMS"},          // 42
+    {"Invoice_other",                "Others"},               // 43
+    {"Invoice_coFee",                "CO Fee"},               // 44
+    {"Invoice_totalVND",             "Total (VND)"},          // 45
+    {"Invoice_subTotalOcean",        "Sub-Total Ocean (USD)"},// 46
+    // ── Invoice Status (rows 47-51) ───────────────────────────────
+    {"Invoice_feeStatus",            "Status paid/Acct"},     // 47
+    {"Invoice_redInvoiceNo",         "Red Invoice#"},         // 48
+    {"Invoice_redInvoiceDate",       "Red Invoice Date"},     // 49
+    {"Invoice_redInvoiceRecvDate",   "Red Invoice Recv"},     // 50
+    {"Invoice_transferAccountantDate","Transfer to Acct"},    // 51
+    // ── Customs (rows 52-64) ──────────────────────────────────────
+    {"Invoice_trucking",             "Trucking"},              // 52
+    {"Invoice_infrastructureFee",    "Infrastructure Fee"},   // 53
+    {"Invoice_customerClearance",    "Customs Clearance"},    // 54
+    {"Invoice_customFee",            "Customs Fee"},          // 55
+    {"Invoice_otherCustomFee",       "Others (Custom)"},      // 56
+    {"Invoice_subTotalVNDCustom",    "Sub-Total VND+Customs"},// 57
+    {"Invoice_subTotalUSDCustom",    "Sub-Total USD+Customs"},// 58
+    {"Invoice_grandTotalVND",        "Grand Total (VND)"},    // 59
+    {"Invoice_grandTotalUSD",        "Grand Total (USD)"},    // 60
+    {"Invoice_cdsNo",                "CDS No"},               // 61
+    {"Invoice_cdsDate",              "CDS Date"},             // 62
+    {"Invoice_cdsApproved",          "CDS Approve"},          // 63
+    {"Invoice_customType",           "Mã loại hình tk"},      // 64
+    {"Invoice_line",                 "Luong"},
+    // ── Audit ────────────────────────────────────────────────────
+    {"createdate","Created"}, {"createby","By"},
+    {"updatedate","Updated"}, {"updateby","Upd By"},
+};
 
         // ════════════════════════════════════════════════════════════════
         public InvoiceForm(UserModel user)
@@ -106,33 +138,33 @@ namespace techlink_workspace.View.Invoice
         }
 
         // ════════════════════════════════════════════════════════════════
-        // UI
+        // BUILD UI
         // ════════════════════════════════════════════════════════════════
         private void BuildUI()
         {
             Text = "Logistics Invoice";
             ClientSize = new Size(1500, 780);
-            MinimumSize = new Size(1100, 500);
+            MinimumSize = new Size(1000, 500);
             StartPosition = FormStartPosition.CenterScreen;
             BackColor = Color.White;
             Font = new Font("Segoe UI", 8.5f);
 
-            // ── Row 1 ─────────────────────────────────────────────────────
+            // ── Row 1: action buttons ─────────────────────────────────────
             var r1 = Row(44, Color.White);
             int x = 8;
-            btnImportExcel = TB(r1, "⬆ Import Excel", Color.FromArgb(0, 51, 153), ref x);
-            btnAdd = TB(r1, "＋ Add", Color.SeaGreen, ref x);
+            btnImport = TB(r1, "⬆ Import ERP", Color.FromArgb(0, 51, 153), ref x);
             btnEdit = TB(r1, "✎ Edit", Color.DarkOrange, ref x);
             btnDelete = TB(r1, "✕ Delete", Color.IndianRed, ref x);
-            x += 10;
+            x += 8;
             btnHistory = TB(r1, "⟳ History", Color.SlateBlue, ref x);
-            x += 10;
+            x += 8;
             btnExportCSV = TB(r1, "⬇ CSV", Color.DarkGreen, ref x);
             btnExportExcel = TB(r1, "⬇ Excel", Color.DarkGreen, ref x);
-            x += 10;
+            x += 8;
+            btnSettings = TB(r1, "⚙ Settings", Color.FromArgb(80, 80, 100), ref x);
             btnRefresh = TB(r1, "↺ Refresh", Color.FromArgb(90, 90, 90), ref x);
 
-            // ── Row 2 – filter bar ────────────────────────────────────────
+            // ── Row 2: filter bar ─────────────────────────────────────────
             var r2 = Row(44, Color.FromArgb(248, 248, 252));
             int x2 = 8;
 
@@ -142,11 +174,8 @@ namespace techlink_workspace.View.Invoice
             r2.Controls.Add(Lbl("Cont:", x2, 14)); x2 += 40;
             cmbContType = Cmb(r2, 80, ref x2);
 
-            r2.Controls.Add(Lbl("Staff:", x2, 14)); x2 += 44;
-            cmbEmployee = Cmb(r2, 100, ref x2);
-
             r2.Controls.Add(Lbl("Status:", x2, 14)); x2 += 52;
-            cmbFeeStatus = Cmb(r2, 80, ref x2);
+            cmbStatus = Cmb(r2, 90, ref x2);
 
             r2.Controls.Add(Lbl("Group:", x2, 14)); x2 += 48;
             cmbGroupCol = Cmb(r2, 130, ref x2);
@@ -154,6 +183,7 @@ namespace techlink_workspace.View.Invoice
 
             r2.Controls.Add(Lbl("In:", x2, 14)); x2 += 22;
             cmbSearchCol = Cmb(r2, 130, ref x2);
+
             txtKeyword = new TextBox
             {
                 Location = new Point(x2, 11),
@@ -170,14 +200,15 @@ namespace techlink_workspace.View.Invoice
                 Font = new Font("Segoe UI", 8.5f)
             };
             r2.Controls.Add(chkDate); x2 += 52;
+
             dtpFrom = DTP(r2, ref x2);
             r2.Controls.Add(Lbl("–", x2, 14)); x2 += 14;
             dtpTo = DTP(r2, ref x2); x2 += 6;
 
-            btnSearch = TB(r2, "🔍", Color.SteelBlue, ref x2, 26, 9, 36);
+            btnSearch = TB(r2, "🔍", Color.SteelBlue, ref x2, 26, 9, 34);
             btnClear = TB(r2, "✕ Clear", Color.DimGray, ref x2, 26, 9);
 
-            // ── Status & grid ────────────────────────────────────────────
+            // ── Status bar ────────────────────────────────────────────────
             lblStatus = new Label
             {
                 Dock = DockStyle.Bottom,
@@ -190,6 +221,7 @@ namespace techlink_workspace.View.Invoice
                 BorderStyle = BorderStyle.FixedSingle
             };
 
+            // ── Data grid ────────────────────────────────────────────────
             dgv = new DataGridView
             {
                 Dock = DockStyle.Fill,
@@ -207,30 +239,29 @@ namespace techlink_workspace.View.Invoice
             dgv.ColumnHeadersHeight = 36;
             dgv.EnableHeadersVisualStyles = false;
             dgv.DefaultCellStyle.Font = new Font("Segoe UI", 8f);
-            dgv.CellDoubleClick += (s, e) => { if (e.RowIndex >= 0 && CanEdit) OpenEdit(false); };
+            dgv.CellDoubleClick += (s, e) => { if (e.RowIndex >= 0) OpenEdit(); };
 
             Controls.Add(dgv);
             Controls.Add(lblStatus);
             Controls.Add(r2);
             Controls.Add(r1);
 
-            // ── Permissions ──────────────────────────────────────────────
-            btnImportExcel.Enabled = CanImport;   // admin only
-            btnAdd.Enabled = CanEdit;
-            btnEdit.Enabled = CanEdit;
+            // ── Permissions ───────────────────────────────────────────────
+            btnImport.Enabled = CanImport;
             btnDelete.Enabled = CanDelete;
-            btnHistory.Enabled = CanEdit;
+            btnHistory.Enabled = CanHistory;
             btnExportCSV.Enabled = CanExport;
-            btnExportExcel.Enabled = CanExport;
+            btnExportExcel.Enabled = Level == 1;
+            btnSettings.Enabled = CanSettings;
 
-            // ── Events ───────────────────────────────────────────────────
-            btnImportExcel.Click += (s, e) => OpenImport();
-            btnAdd.Click += (s, e) => OpenEdit(true);
-            btnEdit.Click += (s, e) => OpenEdit(false);
+            // ── Wire events ───────────────────────────────────────────────
+            btnImport.Click += (s, e) => OpenImport();
+            btnEdit.Click += (s, e) => OpenEdit();
             btnDelete.Click += (s, e) => DeleteSelected();
             btnHistory.Click += (s, e) => OpenHistory();
             btnExportCSV.Click += (s, e) => DoExportCSV();
             btnExportExcel.Click += (s, e) => DoExportExcel();
+            btnSettings.Click += (s, e) => OpenSettings();
             btnRefresh.Click += (s, e) => LoadGrid();
             btnSearch.Click += (s, e) => ApplyFilters();
             btnClear.Click += (s, e) => ClearFilters();
@@ -238,23 +269,24 @@ namespace techlink_workspace.View.Invoice
             cmbGroupCol.SelectedIndexChanged += (s, e) => RefreshGroupVal();
             cmbFwd.SelectedIndexChanged += (s, e) => ApplyFilters();
             cmbContType.SelectedIndexChanged += (s, e) => ApplyFilters();
-            cmbEmployee.SelectedIndexChanged += (s, e) => ApplyFilters();
-            cmbFeeStatus.SelectedIndexChanged += (s, e) => ApplyFilters();
+            cmbStatus.SelectedIndexChanged += (s, e) => ApplyFilters();
             cmbGroupVal.SelectedIndexChanged += (s, e) => ApplyFilters();
         }
 
         // ════════════════════════════════════════════════════════════════
-        // Load & bind
+        // LOAD & BIND
         // ════════════════════════════════════════════════════════════════
         private void LoadGrid()
         {
             try
             {
                 dgv.DataSource = null;
-                _fullData = _repo.GetAll();
+                _fullData = Level <= 2
+                    ? _repo.GetAll()
+                    : _repo.GetByPIC(_user.User_code);   // level 3 sees own invoices only
                 PopulateFilterCombos();
                 BindGrid(_fullData);
-                SetStatus($"{_fullData.Rows.Count} records.", Color.DarkSlateGray);
+                SetStatus($"{_fullData.Rows.Count} record(s) loaded.", Color.DarkSlateGray);
             }
             catch (Exception ex)
             {
@@ -266,19 +298,16 @@ namespace techlink_workspace.View.Invoice
 
         private void BindGrid(DataTable dt)
         {
-            var view = dt.Copy();
-            dgv.DataSource = view;
+            dgv.DataSource = dt.Copy();
 
-            // Hide internal ID but keep accessible
             if (dgv.Columns.Contains("Invoice_Id"))
                 dgv.Columns["Invoice_Id"].Visible = false;
 
-            // Apply friendly headers
             foreach (var kv in HEADERS)
                 if (dgv.Columns.Contains(kv.Key))
                     dgv.Columns[kv.Key].HeaderText = kv.Value;
 
-            // Freeze Invoice_no (first visible)
+            // Freeze Invoice No column
             if (dgv.Columns.Contains("Invoice_no"))
             {
                 dgv.Columns["Invoice_no"].DisplayIndex = 0;
@@ -287,9 +316,9 @@ namespace techlink_workspace.View.Invoice
                     new Font("Segoe UI", 8, FontStyle.Bold);
             }
 
-            // Highlight grand total columns
+            // Highlight totals
             foreach (string col in new[]
-                {"Invoice_grandTotalVND","Invoice_grandTotalUSD","Invoice_subTotalOcean"})
+                { "Invoice_grandTotalVND", "Invoice_grandTotalUSD", "Invoice_subTotalOcean" })
                 if (dgv.Columns.Contains(col))
                 {
                     dgv.Columns[col].DefaultCellStyle.BackColor = Color.LightYellow;
@@ -297,75 +326,75 @@ namespace techlink_workspace.View.Invoice
                         new Font("Segoe UI", 8, FontStyle.Bold);
                 }
 
-            // Colour fee status
+            // Highlight ETD-expired rows pink for level-3 awareness
             dgv.CellFormatting += (s, e) =>
             {
-                if (e.RowIndex < 0 || !dgv.Columns[e.ColumnIndex].Name.Equals("Invoice_feeStatus")) return;
-                int? v = e.Value as int?;
-                if (v == null && e.Value != null && int.TryParse(e.Value.ToString(), out int iv)) v = iv;
-                if (v == null) return;
-                e.CellStyle.BackColor = v == 1 ? Color.LightGreen
-                                      : v == 2 ? Color.LightYellow
-                                      : Color.FromArgb(255, 200, 200);
-                e.CellStyle.ForeColor = Color.Black;
+                if (e.RowIndex < 0) return;
+                var src = (DataTable)dgv.DataSource;
+                if (src == null || e.RowIndex >= src.Rows.Count) return;
+                var dr = src.Rows[e.RowIndex];
+                if (Level == 3 && dr["Invoice_etd"] != DBNull.Value)
+                {
+                    if (Convert.ToDateTime(dr["Invoice_etd"]).Date <
+                        DateTime.Now.AddDays(-7).Date)
+                        e.CellStyle.BackColor = Color.FromArgb(255, 220, 220);
+                }
             };
         }
 
         // ════════════════════════════════════════════════════════════════
-        // Filter combos
+        // FILTER COMBOS
         // ════════════════════════════════════════════════════════════════
         private void PopulateFilterCombos()
         {
             PopDist(cmbFwd, "Invoice_fwdName", "(All FWD)");
             PopDist(cmbContType, "Invoice_contType", "(All Cont)");
-            PopDist(cmbEmployee, "Invoice_employee", "(All Staff)");
 
-            cmbFeeStatus.Items.Clear();
-            cmbFeeStatus.Items.AddRange(new object[]
-                {"(All Status)","1 - Paid","2 - Acct","3 - Not yet"});
-            cmbFeeStatus.SelectedIndex = 0;
+            cmbStatus.Items.Clear();
+            cmbStatus.Items.AddRange(new object[]
+                { "(All Status)", "BLANK", "BOOKED", "CANCEL", "SHIPPED", "WAITING" });
+            cmbStatus.SelectedIndex = 0;
 
-            // Group-by columns
             cmbGroupCol.Items.Clear();
             cmbGroupCol.Items.Add("(No grouping)");
             foreach (string c in new[]
             {
-                "Invoice_fwdName","Invoice_contType","Invoice_employee",
-                "Invoice_shippingTerm","Invoice_billType","Invoice_line",
-                "Invoice_customType","Invoice_co"
+                "Invoice_fwdName", "Invoice_contType", "Invoice_logisticPersonInCharge",
+                "Invoice_billType", "Invoice_line", "Invoice_customType"
             })
                 cmbGroupCol.Items.Add(c);
             if (cmbGroupCol.SelectedIndex < 0) cmbGroupCol.SelectedIndex = 0;
 
-            // Search-in
             cmbSearchCol.Items.Clear();
             cmbSearchCol.Items.Add("(All columns)");
-            foreach (DataColumn c in _fullData.Columns)
-                if (c.ColumnName != "Invoice_Id")
-                    cmbSearchCol.Items.Add(c.ColumnName);
+            if (_fullData != null)
+                foreach (DataColumn c in _fullData.Columns)
+                    if (c.ColumnName != "Invoice_Id") cmbSearchCol.Items.Add(c.ColumnName);
             if (cmbSearchCol.SelectedIndex < 0) cmbSearchCol.SelectedIndex = 0;
 
             dtpFrom.Value = DateTime.Today.AddYears(-1);
             dtpTo.Value = DateTime.Today;
         }
 
-        private void PopDist(ComboBox cmb, string col, string all)
+        private void PopDist(ComboBox cmb, string col, string allLabel)
         {
             string cur = cmb.SelectedItem?.ToString();
-            cmb.Items.Clear(); cmb.Items.Add(all);
+            cmb.Items.Clear();
+            cmb.Items.Add(allLabel);
             if (_fullData != null && _fullData.Columns.Contains(col))
                 foreach (var v in _fullData.AsEnumerable()
                     .Select(r => r[col]?.ToString() ?? "")
                     .Where(v => !string.IsNullOrWhiteSpace(v))
                     .Distinct().OrderBy(v => v))
                     cmb.Items.Add(v);
-            cmb.SelectedIndex = cur != null && cmb.Items.Contains(cur)
+            cmb.SelectedIndex = (cur != null && cmb.Items.Contains(cur))
                 ? cmb.Items.IndexOf(cur) : 0;
         }
 
         private void RefreshGroupVal()
         {
-            cmbGroupVal.Items.Clear(); cmbGroupVal.Items.Add("(All)");
+            cmbGroupVal.Items.Clear();
+            cmbGroupVal.Items.Add("(All)");
             string col = cmbGroupCol.SelectedItem?.ToString();
             if (col == null || col.StartsWith("(") || _fullData == null
                 || !_fullData.Columns.Contains(col))
@@ -379,7 +408,7 @@ namespace techlink_workspace.View.Invoice
         }
 
         // ════════════════════════════════════════════════════════════════
-        // Filter logic
+        // FILTER LOGIC
         // ════════════════════════════════════════════════════════════════
         private void ApplyFilters()
         {
@@ -387,36 +416,31 @@ namespace techlink_workspace.View.Invoice
 
             string fwd = cmbFwd.SelectedItem?.ToString() ?? "";
             string cont = cmbContType.SelectedItem?.ToString() ?? "";
-            string emp = cmbEmployee.SelectedItem?.ToString() ?? "";
-            string status = cmbFeeStatus.SelectedItem?.ToString() ?? "";
+            string status = cmbStatus.SelectedItem?.ToString() ?? "";
             string groupCol = cmbGroupCol.SelectedItem?.ToString() ?? "";
             string groupVal = cmbGroupVal.SelectedItem?.ToString() ?? "";
             string srchCol = cmbSearchCol.SelectedItem?.ToString() ?? "";
             string kw = txtKeyword.Text.Trim().ToUpper();
             bool useDates = chkDate.Checked;
-            DateTime from = dtpFrom.Value.Date;
-            DateTime to = dtpTo.Value.Date.AddDays(1).AddTicks(-1);
+            var from = dtpFrom.Value.Date;
+            var to = dtpTo.Value.Date.AddDays(1).AddTicks(-1);
+
+            var statusMap = new Dictionary<string, int>
+                { {"BLANK",0}, {"BOOKED",1}, {"CANCEL",2}, {"SHIPPED",3}, {"WAITING",4} };
+            int? filterStatus = (!status.StartsWith("(") && statusMap.ContainsKey(status))
+                ? statusMap[status] : (int?)null;
 
             bool useGroup = !groupCol.StartsWith("(") && !groupVal.StartsWith("(")
                             && _fullData.Columns.Contains(groupCol);
             bool useSrch = !srchCol.StartsWith("(") && _fullData.Columns.Contains(srchCol);
 
-            // Parse status filter
-            int? filterStatus = null;
-            if (!status.StartsWith("(") && status.Length > 0)
-                if (int.TryParse(status.Substring(0, 1), out int fs)) filterStatus = fs;
-
             var filtered = _fullData.Clone();
             foreach (DataRow row in _fullData.Rows)
             {
-                if (!fwd.StartsWith("(") &&
-                    !Eq(row["Invoice_fwdName"], fwd)) continue;
-                if (!cont.StartsWith("(") &&
-                    !Eq(row["Invoice_contType"], cont)) continue;
-                if (!emp.StartsWith("(") &&
-                    !Eq(row["Invoice_employee"], emp)) continue;
+                if (!fwd.StartsWith("(") && !Eq(row["Invoice_fwdName"], fwd)) continue;
+                if (!cont.StartsWith("(") && !Eq(row["Invoice_contType"], cont)) continue;
                 if (filterStatus.HasValue &&
-                    !Eq(row["Invoice_feeStatus"], filterStatus.Value.ToString())) continue;
+                    !Eq(row["Invoice_shippingStatus"], filterStatus.Value.ToString())) continue;
                 if (useGroup && !Eq(row[groupCol], groupVal)) continue;
                 if (useDates)
                 {
@@ -442,21 +466,20 @@ namespace techlink_workspace.View.Invoice
                 filtered.DefaultView.Sort = groupCol + " ASC";
 
             BindGrid(filtered);
+
             var parts = new List<string> { $"{filtered.Rows.Count} record(s)" };
             if (!fwd.StartsWith("(")) parts.Add($"FWD={fwd}");
             if (!cont.StartsWith("(")) parts.Add($"Cont={cont}");
-            if (!emp.StartsWith("(")) parts.Add($"Staff={emp}");
-            if (filterStatus.HasValue) parts.Add($"Status={filterStatus}");
+            if (filterStatus.HasValue) parts.Add($"Status={status}");
             if (useGroup) parts.Add($"{groupCol}={groupVal}");
-            if (!string.IsNullOrEmpty(kw)) parts.Add($"Keyword='{txtKeyword.Text.Trim()}'");
+            if (!string.IsNullOrEmpty(kw)) parts.Add($"KW='{txtKeyword.Text.Trim()}'");
             if (useDates) parts.Add($"{dtpFrom.Value:dd/MM/yy}–{dtpTo.Value:dd/MM/yy}");
             SetStatus(string.Join(" · ", parts), Color.SteelBlue);
         }
 
         private void ClearFilters()
         {
-            cmbFwd.SelectedIndex = cmbContType.SelectedIndex =
-            cmbEmployee.SelectedIndex = cmbFeeStatus.SelectedIndex =
+            cmbFwd.SelectedIndex = cmbContType.SelectedIndex = cmbStatus.SelectedIndex =
             cmbGroupCol.SelectedIndex = cmbGroupVal.SelectedIndex =
             cmbSearchCol.SelectedIndex = 0;
             txtKeyword.Text = "";
@@ -465,40 +488,31 @@ namespace techlink_workspace.View.Invoice
             SetStatus($"{_fullData?.Rows.Count ?? 0} records.", Color.DarkSlateGray);
         }
 
-        private static bool Eq(object cell, string val) =>
-            string.Equals(cell?.ToString(), val, StringComparison.OrdinalIgnoreCase);
-
         // ════════════════════════════════════════════════════════════════
-        // CRUD
+        // CRUD ACTIONS
         // ════════════════════════════════════════════════════════════════
-        private void OpenEdit(bool isNew)
+        private void OpenEdit()
         {
-            if (!CanEdit) return;
-            InvoiceModel existing = null;
-            if (!isNew)
+            if (dgv.SelectedRows.Count == 0)
+            { CTMessageBox.Show("Select a row to edit."); return; }
+
+            string id = ((DataTable)dgv.DataSource)
+                .Rows[dgv.SelectedRows[0].Index]["Invoice_Id"]?.ToString();
+            var existing = _repo.GetById(id);
+
+            using (var dlg = new InvoiceEditForm(existing, _user.User_code, false, GetScope()))
             {
-                if (dgv.SelectedRows.Count == 0)
-                { CTMessageBox.Show("Select a row to edit."); return; }
-                string id = ((DataTable)dgv.DataSource)
-                    .Rows[dgv.SelectedRows[0].Index]["Invoice_Id"]?.ToString();
-                existing = _repo.GetById(id);
-            }
-            using (var dlg = new InvoiceEditForm(existing, _user.User_code, isNew, GetEditScope()))
-            {
-                if (dlg.ShowDialog(this) == DialogResult.OK)
+                if (dlg.ShowDialog(this) != DialogResult.OK) return;
+                try
                 {
-                    try
-                    {
-                        if (isNew) _repo.Insert(dlg.Result, _user.User_code);
-                        else _repo.Update(dlg.Result, _user.User_code);
-                        LoadGrid();
-                        SetStatus(isNew ? "Record added." : "Record updated.", Color.DarkGreen);
-                    }
-                    catch (Exception ex)
-                    {
-                        CTMessageBox.Show("Save error:\r\n" + ex.Message, "Error",
+                    _repo.Update(dlg.Result, _user.User_code);
+                    LoadGrid();
+                    SetStatus("Record updated.", Color.DarkGreen);
+                }
+                catch (Exception ex)
+                {
+                    CTMessageBox.Show("Save error:\r\n" + ex.Message, "Error",
                         MessageBoxButtons.OK, MessageBoxIcon.Error);
-                    }
                 }
             }
         }
@@ -508,62 +522,72 @@ namespace techlink_workspace.View.Invoice
             if (!CanDelete) return;
             if (dgv.SelectedRows.Count == 0)
             { CTMessageBox.Show("Select a row to delete."); return; }
-            if (CTMessageBox.Show($"Delete {dgv.SelectedRows.Count} record(s)?",
-                "Confirm", MessageBoxButtons.YesNo, MessageBoxIcon.Question)
+
+            if (CTMessageBox.Show(
+                    $"Delete {dgv.SelectedRows.Count} record(s)? This action is logged and reversible via History.",
+                    "Confirm Delete", MessageBoxButtons.YesNo, MessageBoxIcon.Warning)
                 != DialogResult.Yes) return;
 
             var dt = (DataTable)dgv.DataSource;
             foreach (DataGridViewRow gr in dgv.SelectedRows)
             {
                 string id = dt.Rows[gr.Index]["Invoice_Id"]?.ToString();
-                if (!string.IsNullOrEmpty(id)) _repo.Delete(id, _user.User_code);
+                if (!string.IsNullOrEmpty(id))
+                    _repo.Delete(id, _user.User_code);
             }
             LoadGrid();
+            SetStatus("Deleted.", Color.DarkSlateGray);
         }
 
         private void OpenImport()
         {
             using (var dlg = new InvoiceExcelImportForm(_repo, _user.User_code))
-            {
                 dlg.ShowDialog(this);
-                LoadGrid();
-            }
+            LoadGrid();
         }
 
         private void OpenHistory()
         {
-            string id = null, dispName = null;
+            string id = null, disp = null;
             if (dgv.SelectedRows.Count > 0)
             {
                 var dt = (DataTable)dgv.DataSource;
                 var dr = dt.Rows[dgv.SelectedRows[0].Index];
                 id = dr["Invoice_Id"]?.ToString();
-                dispName = dr["Invoice_no"]?.ToString();
+                disp = dr["Invoice_no"]?.ToString();
             }
-            using (var dlg = new InvoiceHistoryForm(_repo, _user.User_code, id, dispName))
+            using (var dlg = new InvoiceHistoryForm(_repo, _user.User_code, id, disp))
                 if (dlg.ShowDialog(this) == DialogResult.OK) LoadGrid();
         }
 
+        private void OpenSettings()
+        {
+            using (var dlg = new InvoiceSettingsForm(_user.User_code))
+                dlg.ShowDialog(this);
+            LoadGrid();   // refresh in case PIC mapping changed visibility
+        }
+
         // ════════════════════════════════════════════════════════════════
-        // Export
+        // EXPORT
         // ════════════════════════════════════════════════════════════════
         private void DoExportCSV()
         {
-            if (dgv.Rows.Count == 0) { CTMessageBox.Show("No data."); return; }
+            if (dgv.Rows.Count == 0) { CTMessageBox.Show("No data to export."); return; }
+
             using (var sfd = new SaveFileDialog
-            {
-                Filter = "CSV|*.csv",
-                FileName = $"Invoice_{DateTime.Now:yyyyMMdd}.csv"
-            })
+            { Filter = "CSV|*.csv", FileName = $"Invoice_{DateTime.Now:yyyyMMdd}.csv" })
             {
                 if (sfd.ShowDialog() != DialogResult.OK) return;
-                var vis = dgv.Columns.Cast<DataGridViewColumn>().Where(c => c.Visible).ToList();
+
+                var vis = dgv.Columns.Cast<DataGridViewColumn>()
+                             .Where(c => c.Visible).ToList();
                 var sb = new StringBuilder();
                 sb.AppendLine(string.Join(",", vis.Select(c => $"\"{c.HeaderText}\"")));
                 foreach (DataGridViewRow row in dgv.Rows)
                     sb.AppendLine(string.Join(",",
                         vis.Select(c => $"\"{row.Cells[c.Name].Value}\"")));
-                File.WriteAllText(sfd.FileName, sb.ToString(), System.Text.Encoding.UTF8);
+
+                File.WriteAllText(sfd.FileName, sb.ToString(), Encoding.UTF8);
                 SetStatus("CSV exported.", Color.DarkGreen);
                 System.Diagnostics.Process.Start(sfd.FileName);
             }
@@ -571,49 +595,67 @@ namespace techlink_workspace.View.Invoice
 
         private void DoExportExcel()
         {
-            if (dgv.Rows.Count == 0) { CTMessageBox.Show("No data."); return; }
+            if (dgv.Rows.Count == 0) { CTMessageBox.Show("No data to export."); return; }
+
             using (var sfd = new SaveFileDialog
-            {
-                Filter = "Excel|*.xlsx",
-                FileName = $"Invoice_{DateTime.Now:yyyyMMdd}.xlsx"
-            })
+            { Filter = "Excel|*.xlsx", FileName = $"Invoice_{DateTime.Now:yyyyMMdd}.xlsx" })
             {
                 if (sfd.ShowDialog() != DialogResult.OK) return;
-                Excel.Application xl = null; Excel.Workbook wb = null;
+
+                Excel.Application xl = null;
+                Excel.Workbook wb = null;
                 try
                 {
                     xl = new Excel.Application { Visible = false, DisplayAlerts = false };
                     wb = xl.Workbooks.Add();
                     var ws = (Excel.Worksheet)wb.Sheets[1];
-                    var vis = dgv.Columns.Cast<DataGridViewColumn>().Where(c => c.Visible).ToList();
+                    var vis = dgv.Columns.Cast<DataGridViewColumn>()
+                                 .Where(c => c.Visible).ToList();
+
                     for (int c = 0; c < vis.Count; c++)
                     {
                         var cell = (Excel.Range)ws.Cells[1, c + 1];
-                        cell.Value2 = vis[c].HeaderText; cell.Font.Bold = true;
-                        cell.Interior.Color = System.Drawing.ColorTranslator.ToOle(Color.FromArgb(255, 153, 0));
+                        cell.Value2 = vis[c].HeaderText;
+                        cell.Font.Bold = true;
+                        cell.Interior.Color =
+                            System.Drawing.ColorTranslator.ToOle(Color.FromArgb(255, 153, 0));
                     }
+
                     for (int r = 0; r < dgv.Rows.Count; r++)
                         for (int c = 0; c < vis.Count; c++)
                             ((Excel.Range)ws.Cells[r + 2, c + 1]).Value2 =
                                 dgv.Rows[r].Cells[vis[c].Name].Value?.ToString() ?? "";
+
                     ws.Columns.AutoFit();
                     wb.SaveAs(sfd.FileName);
                     SetStatus("Excel exported.", Color.DarkGreen);
                     System.Diagnostics.Process.Start(sfd.FileName);
                 }
                 catch (Exception ex)
-                { CTMessageBox.Show("Export error:\r\n" + ex.Message, "Error", MessageBoxButtons.OK, MessageBoxIcon.Error); }
+                {
+                    CTMessageBox.Show("Export error:\r\n" + ex.Message, "Error",
+                        MessageBoxButtons.OK, MessageBoxIcon.Error);
+                }
                 finally
                 {
-                    if (wb != null) { wb.Close(false); System.Runtime.InteropServices.Marshal.ReleaseComObject(wb); }
-                    if (xl != null) { xl.Quit(); System.Runtime.InteropServices.Marshal.ReleaseComObject(xl); }
+                    if (wb != null)
+                    {
+                        wb.Close(false);
+                        System.Runtime.InteropServices.Marshal.ReleaseComObject(wb);
+                    }
+                    if (xl != null)
+                    {
+                        xl.Quit();
+                        System.Runtime.InteropServices.Marshal.ReleaseComObject(xl);
+                    }
                     GC.Collect();
+                    GC.WaitForPendingFinalizers();
                 }
             }
         }
 
         // ════════════════════════════════════════════════════════════════
-        // UI helpers
+        // UI HELPERS
         // ════════════════════════════════════════════════════════════════
         private void SetStatus(string msg, Color color)
         { lblStatus.Text = msg; lblStatus.ForeColor = color; }
@@ -630,7 +672,7 @@ namespace techlink_workspace.View.Invoice
         }
 
         private Button TB(Panel p, string text, Color bg, ref int x,
-                           int h = 28, int top = 8, int fixW = 0)
+                          int h = 28, int top = 8, int fixW = 0)
         {
             int w = fixW > 0 ? fixW : Math.Max(52, text.Length * 7 + 14);
             var b = new Button
@@ -645,7 +687,8 @@ namespace techlink_workspace.View.Invoice
                 Cursor = Cursors.Hand
             };
             b.FlatAppearance.BorderSize = 0;
-            p.Controls.Add(b); x += w + 4;
+            p.Controls.Add(b);
+            x += w + 4;
             return b;
         }
 
@@ -658,7 +701,8 @@ namespace techlink_workspace.View.Invoice
                 DropDownStyle = ComboBoxStyle.DropDownList,
                 Font = new Font("Segoe UI", 8f)
             };
-            p.Controls.Add(c); x += w + 6;
+            p.Controls.Add(c);
+            x += w + 6;
             return c;
         }
 
@@ -671,7 +715,8 @@ namespace techlink_workspace.View.Invoice
                 Format = DateTimePickerFormat.Short,
                 Font = new Font("Segoe UI", 8f)
             };
-            p.Controls.Add(d); x += 106;
+            p.Controls.Add(d);
+            x += 106;
             return d;
         }
 
@@ -684,5 +729,8 @@ namespace techlink_workspace.View.Invoice
                 Font = new Font("Segoe UI", 8.5f, FontStyle.Bold),
                 ForeColor = Color.FromArgb(60, 60, 60)
             };
+
+        private static bool Eq(object cell, string val) =>
+            string.Equals(cell?.ToString(), val, StringComparison.OrdinalIgnoreCase);
     }
 }

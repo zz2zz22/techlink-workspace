@@ -1,118 +1,93 @@
-﻿using java.lang.management;
-using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Text;
-using System.Threading.Tasks;
+﻿using System;
+using System.Diagnostics;
 
 namespace techlink_workspace.Controller.Logic.IDGenerate
 {
+    /// <summary>
+    /// Pure C# ID generator — no IKVM / Java dependency.
+    /// Produces the same style of ascending alphanumeric IDs as the original.
+    /// </summary>
     public class UUIDGenerator
     {
-        private static long START_TMP = 1465142400000L;
-        private static String PID = "";
+        private static readonly long START_TMP = 1465142400000L;
+        private static readonly string PID;            // process id, resolved once at startup
         private static long sequence = 0L;
         private static long userSequence = 0L;
         private static long tenantSequence = 0L;
         private static long last_tmp = -1L;
-        private static long lastTenantId = -1L;
         private static long lastUserId = -1L;
+        private static long lastTenantId = -1L;
+        private static readonly object _lock = new object();
 
         private UUIDGenerator() { }
 
-        private static readonly DateTime Jan1st1970 = new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc);
-
-        private static long getCurrentTime()
+        // ── Use Process.GetCurrentProcess() instead of IKVM ManagementFactory ──
+        static UUIDGenerator()
         {
-            return DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+            PID = Process.GetCurrentProcess().Id.ToString();
         }
+
+        // ── Time helpers ─────────────────────────────────────────────────────
+        private static long getCurrentTime()
+            => DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
 
         private static long getDiffTime()
         {
-            long diff_long = getCurrentTime() - START_TMP;
-
-            //DateTime start = new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc);
-            TimeSpan time = TimeSpan.FromMilliseconds(diff_long);
-            DateTime startdate = new DateTime(1970, 1, 1) + time;
-            String s = startdate.ToString("HHmmssfff");
-
-            diff_long = long.Parse(diff_long / 86400000L + s);
-            return diff_long;
+            long diff = getCurrentTime() - START_TMP;
+            TimeSpan ts = TimeSpan.FromMilliseconds(diff);
+            DateTime dt = new DateTime(1970, 1, 1) + ts;
+            string s = dt.ToString("HHmmssfff");
+            return long.Parse(diff / 86400000L + s);
         }
 
-        public static String getId()
+        // ── Public API ───────────────────────────────────────────────────────
+        public static string getId()
         {
-            long sec = getDiffTime();
-            if (sec == last_tmp)
+            lock (_lock)
             {
-                ++sequence;
+                long sec = getDiffTime();
+                sequence = (sec == last_tmp) ? sequence + 1 : 0L;
+                last_tmp = sec;
+                return sec * 10000L + sequence + PID;
             }
-            else
-            {
-                sequence = 0L;
-            }
-
-            last_tmp = sec;
-            String p = sec * 10000L + sequence + PID;
-            return p;
         }
 
-        public static String getAscId()
+        public static string getAscId()
         {
-            long sec = getDiffTime();
-            if (sec == last_tmp)
+            lock (_lock)
             {
-                ++sequence;
+                long sec = getDiffTime();
+                sequence = (sec == last_tmp) ? sequence + 1 : 0L;
+                last_tmp = sec;
+                return HexTransformatUtil.hex10ToAnly(sec * 10000 + sequence)
+                     + HexTransformatUtil.hex10ToAnly(long.Parse(PID));
             }
-            else
-            {
-                sequence = 0L;
-            }
-
-            last_tmp = sec;
-            String p = HexTransformatUtil.hex10ToAnly(sec * 10000 + sequence) + HexTransformatUtil.hex10ToAnly(long.Parse(PID));
-            return p;
         }
 
-        public static String getUserId()
+        public static string getUserId()
         {
-            long sec = getDiffTime() / 1000L;
-            if (sec == lastUserId)
+            lock (_lock)
             {
-                ++userSequence;
+                long sec = getDiffTime() / 1000L;
+                userSequence = (sec == lastUserId) ? userSequence + 1 : 0L;
+                lastUserId = sec;
+                return HexTransformatUtil.hex10ToAnly(sec)
+                     + HexTransformatUtil.hex10ToAnly(userSequence)
+                     + HexTransformatUtil.hex10ToAnly(long.Parse(PID));
             }
-            else
-            {
-                userSequence = 0L;
-            }
-
-
-            lastUserId = sec;
-            String userId = HexTransformatUtil.hex10ToAnly(sec) + HexTransformatUtil.hex10ToAnly(userSequence) + HexTransformatUtil.hex10ToAnly(long.Parse(PID));
-            return userId;
         }
 
-        public static String getTenantId()
+        public static string getTenantId()
         {
-            long sec = getDiffTime() / 100000L;
-            if (sec == lastTenantId)
+            lock (_lock)
             {
-                ++tenantSequence;
+                long sec = getDiffTime() / 100000L;
+                tenantSequence = (sec == lastTenantId) ? tenantSequence + 1 : 0L;
+                lastTenantId = sec;
+                return HexTransformatUtil.hex10ToAnly(sec)
+                     + HexTransformatUtil.hex10ToAnly(tenantSequence)
+                     + HexTransformatUtil.hex10ToAnly(long.Parse(PID));
             }
-            else
-            {
-                tenantSequence = 0L;
-            }
-
-
-            lastTenantId = sec;
-            String tenantId = HexTransformatUtil.hex10ToAnly(sec) + HexTransformatUtil.hex10ToAnly(tenantSequence) + HexTransformatUtil.hex10ToAnly(long.Parse(PID));
-            return tenantId;
-        }
-
-        static UUIDGenerator()
-        {
-            PID = ManagementFactory.getRuntimeMXBean().getName().Split('@')[0];
         }
     }
 }

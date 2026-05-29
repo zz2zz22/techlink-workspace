@@ -14,7 +14,6 @@ namespace techlink_workspace.Repositories.InvoiceRepo
         private readonly LogRepository _log = new LogRepository();
         private const string TABLE = "dbo.Logistic_InvoiceData";
 
-        // ── Connection helper ────────────────────────────────────────────
         private static SqlConnection Open()
         {
             var c = DatabaseUtils.GetDBConnection();
@@ -35,25 +34,45 @@ namespace techlink_workspace.Repositories.InvoiceRepo
             return dt;
         }
 
+        /// <summary>Level-3 users only see their own invoices.</summary>
+        public DataTable GetByPIC(string picCode)
+        {
+            string sql = $@"SELECT * FROM {TABLE}
+                            WHERE Invoice_logisticPersonInCharge = @pic
+                            ORDER BY createdate DESC";
+            var dt = new DataTable();
+            using (var conn = Open())
+            using (var cmd = new SqlCommand(sql, conn))
+            {
+                cmd.Parameters.AddWithValue("@pic", picCode ?? "");
+                using (var da = new SqlDataAdapter(cmd))
+                    da.Fill(dt);
+            }
+            return dt;
+        }
+
         public InvoiceModel GetById(string id)
         {
             string sql = $"SELECT * FROM {TABLE} WHERE Invoice_Id = @id";
             using (var conn = Open())
             using (var cmd = new SqlCommand(sql, conn))
             {
-                cmd.Parameters.Add("@id", SqlDbType.NVarChar, 50).Value = id;
+                cmd.Parameters.AddWithValue("@id", id ?? "");
                 using (var r = cmd.ExecuteReader())
                     return r.Read() ? Map(r) : null;
             }
         }
 
-        public InvoiceModel GetByInvoiceNo(string invoiceNo)
+        /// <summary>Used for duplicate detection during ERP import.</summary>
+        public InvoiceModel GetByPoNoAndItemCode(string poNo, string itemCode)
         {
-            string sql = $"SELECT * FROM {TABLE} WHERE Invoice_no = @no";
+            string sql = $@"SELECT * FROM {TABLE}
+                            WHERE Invoice_poNo = @poNo AND Invoice_itemCode = @ic";
             using (var conn = Open())
             using (var cmd = new SqlCommand(sql, conn))
             {
-                cmd.Parameters.Add("@no", SqlDbType.NVarChar, 50).Value = invoiceNo;
+                cmd.Parameters.AddWithValue("@poNo", poNo ?? "");
+                cmd.Parameters.AddWithValue("@ic", itemCode ?? "");
                 using (var r = cmd.ExecuteReader())
                     return r.Read() ? Map(r) : null;
             }
@@ -66,65 +85,76 @@ namespace techlink_workspace.Repositories.InvoiceRepo
         {
             using (var conn = Open())
             using (var cmd = new SqlCommand(InsertSql(), conn))
-            {
-                Bind(cmd, m, byUser, isInsert: true);
-                cmd.ExecuteNonQuery();
-            }
+            { Bind(cmd, m, byUser, true); cmd.ExecuteNonQuery(); }
             _log.WriteLog(byUser, "INSERT", "INVOICE", 1,
-                variable: m.Invoice_Id,
-                updateData: JsonConvert.SerializeObject(m));
+                variable: m.Invoice_Id, updateData: JsonConvert.SerializeObject(m));
         }
 
         // ════════════════════════════════════════════════════════════════
-        // BULK INSERT (Excel import) — upsert handled in form layer
+        // BULK INSERT (ERP Excel import)
         // ════════════════════════════════════════════════════════════════
-        public (int inserted, int failed) BulkInsert(
+        public (int inserted, int updated, int failed) BulkInsert(
             IEnumerable<InvoiceModel> records, string byUser)
         {
-            int ok = 0, fail = 0;
-            string sql = InsertSql();
+            int ok = 0, upd = 0, fail = 0;
             var errors = new System.Text.StringBuilder();
 
             using (var conn = Open())
             {
                 foreach (var m in records)
                 {
-                    if (string.IsNullOrEmpty(m.Invoice_Id))
-                        m.Invoice_Id = Guid.NewGuid().ToString();
-
-                    // Guard: Invoice_no must not be empty (NOT NULL in DB)
-                    if (string.IsNullOrWhiteSpace(m.Invoice_no))
+                    if (string.IsNullOrWhiteSpace(m.Invoice_poNo))
                     { fail++; continue; }
 
                     try
                     {
-                        using (var cmd = new SqlCommand(sql, conn))
+                        var existing = GetByPoNoAndItemCode(m.Invoice_poNo, m.Invoice_itemCode);
+                        if (existing != null)
                         {
-                            Bind(cmd, m, byUser, isInsert: true);
-                            cmd.ExecuteNonQuery();
+                            // Preserve logistics data, update only ERP columns
+                            existing.Invoice_customerCode = m.Invoice_customerCode;
+                            existing.Invoice_customerName = m.Invoice_customerName;
+                            existing.Invoice_customerRequestDate = m.Invoice_customerRequestDate;
+                            existing.Invoice_poNo = m.Invoice_poNo;
+                            existing.Invoice_poDate = m.Invoice_poDate;
+                            existing.Invoice_saleName = m.Invoice_saleName;
+                            existing.Invoice_factoryNo = m.Invoice_factoryNo;
+                            existing.Invoice_factoryName = m.Invoice_factoryName;
+                            existing.Invoice_itemCode = m.Invoice_itemCode;
+                            existing.Invoice_itemCodeCustomers = m.Invoice_itemCodeCustomers;
+                            existing.Invoice_itemName = m.Invoice_itemName;
+                            existing.Invoice_quantity = m.Invoice_quantity;
+                            existing.Invoice_unit = m.Invoice_unit;
+                            // Auto-update PIC if changed
+                            if (!string.IsNullOrWhiteSpace(m.Invoice_logisticPersonInCharge))
+                                existing.Invoice_logisticPersonInCharge = m.Invoice_logisticPersonInCharge;
+                            using (var cmd = new SqlCommand(UpdateSql(), conn))
+                            { Bind(cmd, existing, byUser, false); cmd.ExecuteNonQuery(); }
+                            upd++;
                         }
-                        ok++;
+                        else
+                        {
+                            using (var cmd = new SqlCommand(InsertSql(), conn))
+                            { Bind(cmd, m, byUser, true); cmd.ExecuteNonQuery(); }
+                            ok++;
+                        }
                     }
                     catch (SqlException ex)
                     {
                         fail++;
-                        // Capture first 5 unique errors for diagnosis
-                        if (fail <= 5)
-                            errors.AppendLine($"Row {m.Invoice_no}: {ex.Message}");
+                        if (fail <= 5) errors.AppendLine($"{m.Invoice_poNo}/{m.Invoice_itemCode}: {ex.Message}");
                     }
                 }
             }
 
             _log.WriteLog(byUser, "BULK_INSERT", "INVOICE", 1,
-                updateData: $"{ok} inserted, {fail} failed" +
+                updateData: $"{ok} inserted, {upd} updated, {fail} failed" +
                             (errors.Length > 0 ? "\n" + errors : ""));
 
-            // Surface errors to caller if any occurred
             if (fail > 0 && errors.Length > 0)
-                throw new Exception(
-                    $"{ok} inserted, {fail} failed.\n\nFirst errors:\n{errors}");
+                throw new Exception($"{ok} inserted, {upd} updated, {fail} failed.\n\n{errors}");
 
-            return (ok, fail);
+            return (ok, upd, fail);
         }
 
         // ════════════════════════════════════════════════════════════════
@@ -135,10 +165,7 @@ namespace techlink_workspace.Repositories.InvoiceRepo
             var old = GetById(m.Invoice_Id);
             using (var conn = Open())
             using (var cmd = new SqlCommand(UpdateSql(), conn))
-            {
-                Bind(cmd, m, byUser, isInsert: false);
-                cmd.ExecuteNonQuery();
-            }
+            { Bind(cmd, m, byUser, false); cmd.ExecuteNonQuery(); }
             _log.WriteLog(byUser, "UPDATE", "INVOICE", 1,
                 variable: m.Invoice_Id,
                 oldData: old != null ? JsonConvert.SerializeObject(old) : "",
@@ -146,7 +173,7 @@ namespace techlink_workspace.Repositories.InvoiceRepo
         }
 
         // ════════════════════════════════════════════════════════════════
-        // DELETE
+        // DELETE (Level-1 only – enforced in the View layer)
         // ════════════════════════════════════════════════════════════════
         public void Delete(string id, string byUser)
         {
@@ -154,29 +181,22 @@ namespace techlink_workspace.Repositories.InvoiceRepo
             string sql = $"DELETE FROM {TABLE} WHERE Invoice_Id = @id";
             using (var conn = Open())
             using (var cmd = new SqlCommand(sql, conn))
-            {
-                cmd.Parameters.Add("@id", SqlDbType.NVarChar, 50).Value = id;
-                cmd.ExecuteNonQuery();
-            }
+            { cmd.Parameters.AddWithValue("@id", id ?? ""); cmd.ExecuteNonQuery(); }
             _log.WriteLog(byUser, "DELETE", "INVOICE", 1,
                 variable: id,
                 oldData: old != null ? JsonConvert.SerializeObject(old) : "");
         }
 
         // ════════════════════════════════════════════════════════════════
-        // VERSION HISTORY
+        // HISTORY / ROLLBACK
         // ════════════════════════════════════════════════════════════════
         public DataTable GetHistory(string invoiceId = null)
         {
-            string sql = @"
-                SELECT Log_Id, Log_EmployeeId, Log_WriteDate, Log_Function,
-                       Log_Result, Log_Variable, Log_OldData, Log_UpdateData
-                FROM dbo.Sys_LogOperation
-                WHERE Log_Module = 'INVOICE'";
-
+            string sql = @"SELECT Log_Id, Log_EmployeeId, Log_WriteDate, Log_Function,
+                                  Log_Result, Log_Variable, Log_OldData, Log_UpdateData
+                           FROM dbo.Sys_LogOperation WHERE Log_Module='INVOICE'";
             if (!string.IsNullOrEmpty(invoiceId))
-                sql += " AND (Log_Variable = @var OR Log_OldData LIKE @like OR Log_UpdateData LIKE @like)";
-
+                sql += " AND (Log_Variable=@var OR Log_OldData LIKE @like OR Log_UpdateData LIKE @like)";
             sql += " ORDER BY Log_WriteDate DESC";
 
             var dt = new DataTable();
@@ -185,30 +205,22 @@ namespace techlink_workspace.Repositories.InvoiceRepo
             {
                 if (!string.IsNullOrEmpty(invoiceId))
                 {
-                    cmd.Parameters.Add("@var", SqlDbType.NVarChar, 50).Value = invoiceId;
-                    cmd.Parameters.Add("@like", SqlDbType.NVarChar).Value = $"%{invoiceId}%";
+                    cmd.Parameters.AddWithValue("@var", invoiceId);
+                    cmd.Parameters.AddWithValue("@like", $"%{invoiceId}%");
                 }
-                using (var da = new SqlDataAdapter(cmd))
-                    da.Fill(dt);
+                using (var da = new SqlDataAdapter(cmd)) da.Fill(dt);
             }
             return dt;
         }
 
-        // ════════════════════════════════════════════════════════════════
-        // ROLLBACK
-        // ════════════════════════════════════════════════════════════════
         public void Rollback(string logId, string byUser)
         {
-            string fetchSql = @"
-                SELECT Log_OldData, Log_Variable
-                FROM dbo.Sys_LogOperation
-                WHERE Log_Id = @lid";
-
+            const string fetch = "SELECT Log_OldData, Log_Variable FROM dbo.Sys_LogOperation WHERE Log_Id=@lid";
             string oldJson, id;
             using (var conn = Open())
-            using (var cmd = new SqlCommand(fetchSql, conn))
+            using (var cmd = new SqlCommand(fetch, conn))
             {
-                cmd.Parameters.Add("@lid", SqlDbType.NVarChar, 50).Value = logId;
+                cmd.Parameters.AddWithValue("@lid", logId);
                 using (var r = cmd.ExecuteReader())
                 {
                     if (!r.Read()) throw new Exception("Log entry not found.");
@@ -216,19 +228,13 @@ namespace techlink_workspace.Repositories.InvoiceRepo
                     id = r["Log_Variable"]?.ToString();
                 }
             }
-
-            if (string.IsNullOrWhiteSpace(oldJson))
-                throw new Exception("No snapshot available for this entry.");
-
-            var m = JsonConvert.DeserializeObject<InvoiceModel>(oldJson);
-            if (m == null) throw new Exception("Failed to deserialize snapshot.");
-
+            if (string.IsNullOrWhiteSpace(oldJson)) throw new Exception("No snapshot available.");
+            var m = JsonConvert.DeserializeObject<InvoiceModel>(oldJson)
+                    ?? throw new Exception("Failed to deserialize snapshot.");
             Delete(id, byUser);
             Insert(m, byUser);
-
             _log.WriteLog(byUser, "ROLLBACK", "INVOICE", 1,
-                variable: id,
-                updateData: $"Rolled back to log entry {logId}");
+                variable: id, updateData: $"Rolled back to log entry {logId}");
         }
 
         // ════════════════════════════════════════════════════════════════
@@ -236,173 +242,173 @@ namespace techlink_workspace.Repositories.InvoiceRepo
         // ════════════════════════════════════════════════════════════════
         private static string InsertSql() => $@"
             INSERT INTO {TABLE} (
-                Invoice_Id, Invoice_no, Invoice_erpID, Invoice_erpInvoiceNo,
-                Invoice_shippingTerm, Invoice_paymentTerm, Invoice_employee,
-                Invoice_logisticRemark, Invoice_confirmDate, Invoice_fwdName,
-                Invoice_bookingNo, Invoice_contType, Invoice_vgmCO, Invoice_cyCO,
-                Invoice_etd, Invoice_eta, Invoice_billType, Invoice_billNo,
-                Invoice_co, Invoice_coNo,
-                Invoice_OF, Invoice_deliveryCharges, Invoice_taxes,
-                Invoice_otherDestCharges, Invoice_thc, Invoice_blFee,
-                Invoice_seal, Invoice_telexRelease, Invoice_cfs, Invoice_vgmFee,
-                Invoice_ensebsams, Invoice_other, Invoice_totalVND,
-                Invoice_subTotalOcean, Invoice_coFee, Invoice_feeStatus,
+                Invoice_Id, Invoice_no,
+                Invoice_customerCode, Invoice_customerName, Invoice_customerRequestDate,
+                Invoice_poNo, Invoice_poDate, Invoice_brand, Invoice_saleName,
+                Invoice_factoryNo, Invoice_factoryName,
+                Invoice_itemCode, Invoice_itemCodeCustomers, Invoice_itemName,
+                Invoice_quantity, Invoice_unit,
+                Invoice_shippingTerm, Invoice_paymentTerm, Invoice_logisticPersonInCharge,
+                Invoice_logisticNote, Invoice_factoryConfirmDate, Invoice_shippingStatus,
+                Invoice_fwdName, Invoice_bookingNo, Invoice_contType,
+                Invoice_vgmCO, Invoice_cyCO, Invoice_etd, Invoice_eta,
+                Invoice_billType, Invoice_billNo, Invoice_co, Invoice_coNo,
+                Invoice_OF, Invoice_deliveryCharges, Invoice_taxes, Invoice_otherDestCharges,
+                Invoice_thc, Invoice_blFee, Invoice_seal, Invoice_telexRelease,
+                Invoice_cfs, Invoice_vgmFee, Invoice_ensebsams, Invoice_other,
+                Invoice_coFee, Invoice_totalVND, Invoice_subTotalOcean, Invoice_feeStatus,
                 Invoice_redInvoiceNo, Invoice_redInvoiceDate,
                 Invoice_redInvoiceRecvDate, Invoice_transferAccountantDate,
-                Invoice_trucking, Invoice_infrastructureFee,
-                Invoice_customerClearance, Invoice_customFee, Invoice_otherCustomFee,
+                Invoice_trucking, Invoice_infrastructureFee, Invoice_customerClearance,
+                Invoice_customFee, Invoice_otherCustomFee,
                 Invoice_subTotalVNDCustom, Invoice_subTotalUSDCustom,
                 Invoice_grandTotalVND, Invoice_grandTotalUSD,
-                Invoice_cdsNo, Invoice_cdsDate, Invoice_line, Invoice_customType,
+                Invoice_cdsNo, Invoice_cdsDate, Invoice_cdsApproved,
+                Invoice_line, Invoice_customType,
                 createdate, createby, updatedate, updateby
             ) VALUES (
-                @id, @no, @erpid, @erpinvno,
-                @shipterm, @payterm, @emp,
-                @logremark, @confirmdate, @fwdname,
-                @bookno, @conttype, @vgmco, @cyco,
-                @etd, @eta, @billtype, @billno,
-                @co, @cono,
-                @OF, @delchg, @taxes,
-                @otherdest, @thc, @blfee,
-                @seal, @telex, @cfs, @vgm,
-                @ens, @other, @totalvnd,
-                @subtotalocean, @cofee, @feestatus,
-                @redinvno, @redinvdate,
-                @redinvrecv, @transferacct,
-                @truck, @infra,
-                @custclear, @custfee, @othercustfee,
-                @subtotalvndcust, @subtotalusdcust,
-                @grandvnd, @grandusd,
-                @cdsno, @cdsdate, @line, @customtype,
+                @id, @no,
+                @custCode, @custName, @custReqDate,
+                @poNo, @poDate, @brand, @saleName,
+                @factoryNo, @factoryName,
+                @itemCode, @itemCodeCust, @itemName,
+                @qty, @unit,
+                @shipTerm, @payTerm, @pic,
+                @note, @confirmDate, @status,
+                @fwdName, @bookNo, @contType,
+                @vgmCO, @cyCO, @etd, @eta,
+                @billType, @billNo, @co, @coNo,
+                @OF, @del, @taxes, @otherDest,
+                @thc, @bl, @seal, @telex,
+                @cfs, @vgm, @ens, @other,
+                @coFee, @totalVND, @subOcean, @feeStatus,
+                @redInvNo, @redInvDate,
+                @redInvRecv, @transferAcct,
+                @truck, @infra, @custClear,
+                @custFee, @otherCust,
+                @subVNDCust, @subUSDCust,
+                @grandVND, @grandUSD,
+                @cdsNo, @cdsDate, @cdsApproved,
+                @line, @customType,
                 @cdate, @cby, @udate, @uby
             )";
 
         private static string UpdateSql() => $@"
             UPDATE {TABLE} SET
-                Invoice_no              = @no,
-                Invoice_erpID           = @erpid,
-                Invoice_erpInvoiceNo    = @erpinvno,
-                Invoice_shippingTerm    = @shipterm,
-                Invoice_paymentTerm     = @payterm,
-                Invoice_employee        = @emp,
-                Invoice_logisticRemark  = @logremark,
-                Invoice_confirmDate     = @confirmdate,
-                Invoice_fwdName         = @fwdname,
-                Invoice_bookingNo       = @bookno,
-                Invoice_contType        = @conttype,
-                Invoice_vgmCO           = @vgmco,
-                Invoice_cyCO            = @cyco,
-                Invoice_etd             = @etd,
-                Invoice_eta             = @eta,
-                Invoice_billType        = @billtype,
-                Invoice_billNo          = @billno,
-                Invoice_co              = @co,
-                Invoice_coNo            = @cono,
-                Invoice_OF              = @OF,
-                Invoice_deliveryCharges = @delchg,
-                Invoice_taxes           = @taxes,
-                Invoice_otherDestCharges= @otherdest,
-                Invoice_thc             = @thc,
-                Invoice_blFee           = @blfee,
-                Invoice_seal            = @seal,
-                Invoice_telexRelease    = @telex,
-                Invoice_cfs             = @cfs,
-                Invoice_vgmFee          = @vgm,
-                Invoice_ensebsams       = @ens,
-                Invoice_other           = @other,
-                Invoice_totalVND        = @totalvnd,
-                Invoice_subTotalOcean   = @subtotalocean,
-                Invoice_coFee           = @cofee,
-                Invoice_feeStatus       = @feestatus,
-                Invoice_redInvoiceNo    = @redinvno,
-                Invoice_redInvoiceDate  = @redinvdate,
-                Invoice_redInvoiceRecvDate    = @redinvrecv,
-                Invoice_transferAccountantDate = @transferacct,
-                Invoice_trucking             = @truck,
-                Invoice_infrastructureFee    = @infra,
-                Invoice_customerClearance    = @custclear,
-                Invoice_customFee            = @custfee,
-                Invoice_otherCustomFee       = @othercustfee,
-                Invoice_subTotalVNDCustom    = @subtotalvndcust,
-                Invoice_subTotalUSDCustom    = @subtotalusdcust,
-                Invoice_grandTotalVND        = @grandvnd,
-                Invoice_grandTotalUSD        = @grandusd,
-                Invoice_cdsNo           = @cdsno,
-                Invoice_cdsDate         = @cdsdate,
-                Invoice_line            = @line,
-                Invoice_customType      = @customtype,
-                updatedate              = @udate,
-                updateby                = @uby
-            WHERE Invoice_Id = @id";
+                Invoice_no=@no,
+                Invoice_customerCode=@custCode, Invoice_customerName=@custName,
+                Invoice_customerRequestDate=@custReqDate,
+                Invoice_poNo=@poNo, Invoice_poDate=@poDate, Invoice_brand=@brand, Invoice_saleName=@saleName,
+                Invoice_factoryNo=@factoryNo, Invoice_factoryName=@factoryName,
+                Invoice_itemCode=@itemCode, Invoice_itemCodeCustomers=@itemCodeCust,
+                Invoice_itemName=@itemName, Invoice_quantity=@qty, Invoice_unit=@unit,
+                Invoice_shippingTerm=@shipTerm, Invoice_paymentTerm=@payTerm,
+                Invoice_logisticPersonInCharge=@pic,
+                Invoice_logisticNote=@note, Invoice_factoryConfirmDate=@confirmDate,
+                Invoice_shippingStatus=@status,
+                Invoice_fwdName=@fwdName, Invoice_bookingNo=@bookNo,
+                Invoice_contType=@contType, Invoice_vgmCO=@vgmCO, Invoice_cyCO=@cyCO,
+                Invoice_etd=@etd, Invoice_eta=@eta,
+                Invoice_billType=@billType, Invoice_billNo=@billNo,
+                Invoice_co=@co, Invoice_coNo=@coNo,
+                Invoice_OF=@OF, Invoice_deliveryCharges=@del,
+                Invoice_taxes=@taxes, Invoice_otherDestCharges=@otherDest,
+                Invoice_thc=@thc, Invoice_blFee=@bl, Invoice_seal=@seal,
+                Invoice_telexRelease=@telex, Invoice_cfs=@cfs, Invoice_vgmFee=@vgm,
+                Invoice_ensebsams=@ens, Invoice_other=@other,
+                Invoice_coFee=@coFee, Invoice_totalVND=@totalVND,
+                Invoice_subTotalOcean=@subOcean, Invoice_feeStatus=@feeStatus,
+                Invoice_redInvoiceNo=@redInvNo, Invoice_redInvoiceDate=@redInvDate,
+                Invoice_redInvoiceRecvDate=@redInvRecv,
+                Invoice_transferAccountantDate=@transferAcct,
+                Invoice_trucking=@truck, Invoice_infrastructureFee=@infra,
+                Invoice_customerClearance=@custClear, Invoice_customFee=@custFee,
+                Invoice_otherCustomFee=@otherCust,
+                Invoice_subTotalVNDCustom=@subVNDCust, Invoice_subTotalUSDCustom=@subUSDCust,
+                Invoice_grandTotalVND=@grandVND, Invoice_grandTotalUSD=@grandUSD,
+                Invoice_cdsNo=@cdsNo, Invoice_cdsDate=@cdsDate,
+                Invoice_cdsApproved=@cdsApproved,
+                Invoice_line=@line, Invoice_customType=@customType,
+                updatedate=@udate, updateby=@uby
+            WHERE Invoice_Id=@id";
 
         // ════════════════════════════════════════════════════════════════
-        // Parameter binder — shared by Insert and Update
+        // Param binder
         // ════════════════════════════════════════════════════════════════
-        private static void Bind(SqlCommand cmd, InvoiceModel m,
-                                  string byUser, bool isInsert)
+        private static void Bind(SqlCommand cmd, InvoiceModel m, string byUser, bool isInsert)
         {
             var now = DateTime.Now;
-
-            // Use AddWithValue for all params — avoids size/type mismatch issues.
-            // DBNull helper for nullable types.
-            object N(object v) => v ?? (object)DBNull.Value;
+            object N(object v) => v ?? DBNull.Value;
 
             cmd.Parameters.AddWithValue("@id", N(m.Invoice_Id));
             cmd.Parameters.AddWithValue("@no", N(m.Invoice_no));
-            cmd.Parameters.AddWithValue("@erpid", N(m.Invoice_erpID));
-            cmd.Parameters.AddWithValue("@erpinvno", N(m.Invoice_erpInvoiceNo));
-            cmd.Parameters.AddWithValue("@shipterm", N(m.Invoice_shippingTerm));
-            cmd.Parameters.AddWithValue("@payterm", N(m.Invoice_paymentTerm));
-            cmd.Parameters.AddWithValue("@emp", N(m.Invoice_employee));
-            cmd.Parameters.AddWithValue("@logremark", N(m.Invoice_logisticRemark));
-            cmd.Parameters.AddWithValue("@confirmdate", N(m.Invoice_confirmDate));
-            cmd.Parameters.AddWithValue("@fwdname", N(m.Invoice_fwdName));
-            cmd.Parameters.AddWithValue("@bookno", N(m.Invoice_bookingNo));
-            cmd.Parameters.AddWithValue("@conttype", N(m.Invoice_contType));
-            cmd.Parameters.AddWithValue("@vgmco", N(m.Invoice_vgmCO));
-            cmd.Parameters.AddWithValue("@cyco", N(m.Invoice_cyCO));
+            cmd.Parameters.AddWithValue("@custCode", N(m.Invoice_customerCode));
+            cmd.Parameters.AddWithValue("@custName", N(m.Invoice_customerName));
+            cmd.Parameters.AddWithValue("@custReqDate", N(m.Invoice_customerRequestDate));
+            cmd.Parameters.AddWithValue("@poNo", N(m.Invoice_poNo));
+            cmd.Parameters.AddWithValue("@poDate", N(m.Invoice_poDate));
+            cmd.Parameters.AddWithValue("@brand", N(m.Invoice_brand));
+            cmd.Parameters.AddWithValue("@saleName", N(m.Invoice_saleName));
+            cmd.Parameters.AddWithValue("@factoryNo", N(m.Invoice_factoryNo));
+            cmd.Parameters.AddWithValue("@factoryName", N(m.Invoice_factoryName));
+            cmd.Parameters.AddWithValue("@itemCode", N(m.Invoice_itemCode));
+            cmd.Parameters.AddWithValue("@itemCodeCust", N(m.Invoice_itemCodeCustomers));
+            cmd.Parameters.AddWithValue("@itemName", N(m.Invoice_itemName));
+            cmd.Parameters.AddWithValue("@qty", N(m.Invoice_quantity));
+            cmd.Parameters.AddWithValue("@unit", N(m.Invoice_unit));
+            cmd.Parameters.AddWithValue("@shipTerm", N(m.Invoice_shippingTerm));
+            cmd.Parameters.AddWithValue("@payTerm", N(m.Invoice_paymentTerm));
+            cmd.Parameters.AddWithValue("@pic", N(m.Invoice_logisticPersonInCharge));
+            cmd.Parameters.AddWithValue("@note", N(m.Invoice_logisticNote));
+            cmd.Parameters.AddWithValue("@confirmDate", N(m.Invoice_factoryConfirmDate));
+            cmd.Parameters.AddWithValue("@status", N(m.Invoice_shippingStatus));
+            cmd.Parameters.AddWithValue("@fwdName", N(m.Invoice_fwdName));
+            cmd.Parameters.AddWithValue("@bookNo", N(m.Invoice_bookingNo));
+            cmd.Parameters.AddWithValue("@contType", N(m.Invoice_contType));
+            cmd.Parameters.AddWithValue("@vgmCO", N(m.Invoice_vgmCO));
+            cmd.Parameters.AddWithValue("@cyCO", N(m.Invoice_cyCO));
             cmd.Parameters.AddWithValue("@etd", N(m.Invoice_etd));
             cmd.Parameters.AddWithValue("@eta", N(m.Invoice_eta));
-            cmd.Parameters.AddWithValue("@billtype", N(m.Invoice_billType));
-            cmd.Parameters.AddWithValue("@billno", N(m.Invoice_billNo));
+            cmd.Parameters.AddWithValue("@billType", N(m.Invoice_billType));
+            cmd.Parameters.AddWithValue("@billNo", N(m.Invoice_billNo));
             cmd.Parameters.AddWithValue("@co", N(m.Invoice_co));
-            cmd.Parameters.AddWithValue("@cono", N(m.Invoice_coNo));
+            cmd.Parameters.AddWithValue("@coNo", N(m.Invoice_coNo));
             cmd.Parameters.AddWithValue("@OF", N(m.Invoice_OF));
-            cmd.Parameters.AddWithValue("@delchg", N(m.Invoice_deliveryCharges));
+            cmd.Parameters.AddWithValue("@del", N(m.Invoice_deliveryCharges));
             cmd.Parameters.AddWithValue("@taxes", N(m.Invoice_taxes));
-            cmd.Parameters.AddWithValue("@otherdest", N(m.Invoice_otherDestCharges));
+            cmd.Parameters.AddWithValue("@otherDest", N(m.Invoice_otherDestCharges));
             cmd.Parameters.AddWithValue("@thc", N(m.Invoice_thc));
-            cmd.Parameters.AddWithValue("@blfee", N(m.Invoice_blFee));
+            cmd.Parameters.AddWithValue("@bl", N(m.Invoice_blFee));
             cmd.Parameters.AddWithValue("@seal", N(m.Invoice_seal));
             cmd.Parameters.AddWithValue("@telex", N(m.Invoice_telexRelease));
             cmd.Parameters.AddWithValue("@cfs", N(m.Invoice_cfs));
             cmd.Parameters.AddWithValue("@vgm", N(m.Invoice_vgmFee));
             cmd.Parameters.AddWithValue("@ens", N(m.Invoice_ensebsams));
             cmd.Parameters.AddWithValue("@other", N(m.Invoice_other));
-            cmd.Parameters.AddWithValue("@totalvnd", N(m.Invoice_totalVND));
-            cmd.Parameters.AddWithValue("@subtotalocean", N(m.Invoice_subTotalOcean));
-            cmd.Parameters.AddWithValue("@cofee", N(m.Invoice_coFee));
-            cmd.Parameters.AddWithValue("@feestatus", N(m.Invoice_feeStatus));
-            cmd.Parameters.AddWithValue("@redinvno", N(m.Invoice_redInvoiceNo));
-            cmd.Parameters.AddWithValue("@redinvdate", N(m.Invoice_redInvoiceDate));
-            cmd.Parameters.AddWithValue("@redinvrecv", N(m.Invoice_redInvoiceRecvDate));
-            cmd.Parameters.AddWithValue("@transferacct", N(m.Invoice_transferAccountantDate));
+            cmd.Parameters.AddWithValue("@coFee", N(m.Invoice_coFee));
+            cmd.Parameters.AddWithValue("@totalVND", N(m.Invoice_totalVND));
+            cmd.Parameters.AddWithValue("@subOcean", N(m.Invoice_subTotalOcean));
+            cmd.Parameters.AddWithValue("@feeStatus", N(m.Invoice_feeStatus));
+            cmd.Parameters.AddWithValue("@redInvNo", N(m.Invoice_redInvoiceNo));
+            cmd.Parameters.AddWithValue("@redInvDate", N(m.Invoice_redInvoiceDate));
+            cmd.Parameters.AddWithValue("@redInvRecv", N(m.Invoice_redInvoiceRecvDate));
+            cmd.Parameters.AddWithValue("@transferAcct", N(m.Invoice_transferAccountantDate));
             cmd.Parameters.AddWithValue("@truck", N(m.Invoice_trucking));
             cmd.Parameters.AddWithValue("@infra", N(m.Invoice_infrastructureFee));
-            cmd.Parameters.AddWithValue("@custclear", N(m.Invoice_customerClearance));
-            cmd.Parameters.AddWithValue("@custfee", N(m.Invoice_customFee));
-            cmd.Parameters.AddWithValue("@othercustfee", N(m.Invoice_otherCustomFee));
-            cmd.Parameters.AddWithValue("@subtotalvndcust", N(m.Invoice_subTotalVNDCustom));
-            cmd.Parameters.AddWithValue("@subtotalusdcust", N(m.Invoice_subTotalUSDCustom));
-            cmd.Parameters.AddWithValue("@grandvnd", N(m.Invoice_grandTotalVND));
-            cmd.Parameters.AddWithValue("@grandusd", N(m.Invoice_grandTotalUSD));
-            cmd.Parameters.AddWithValue("@cdsno", N(m.Invoice_cdsNo));
-            cmd.Parameters.AddWithValue("@cdsdate", N(m.Invoice_cdsDate));
+            cmd.Parameters.AddWithValue("@custClear", N(m.Invoice_customerClearance));
+            cmd.Parameters.AddWithValue("@custFee", N(m.Invoice_customFee));
+            cmd.Parameters.AddWithValue("@otherCust", N(m.Invoice_otherCustomFee));
+            cmd.Parameters.AddWithValue("@subVNDCust", N(m.Invoice_subTotalVNDCustom));
+            cmd.Parameters.AddWithValue("@subUSDCust", N(m.Invoice_subTotalUSDCustom));
+            cmd.Parameters.AddWithValue("@grandVND", N(m.Invoice_grandTotalVND));
+            cmd.Parameters.AddWithValue("@grandUSD", N(m.Invoice_grandTotalUSD));
+            cmd.Parameters.AddWithValue("@cdsNo", N(m.Invoice_cdsNo));
+            cmd.Parameters.AddWithValue("@cdsDate", N(m.Invoice_cdsDate));
+            cmd.Parameters.AddWithValue("@cdsApproved", N(m.Invoice_cdsApproved));
             cmd.Parameters.AddWithValue("@line", N(m.Invoice_line));
-            cmd.Parameters.AddWithValue("@customtype", N(m.Invoice_customType));
+            cmd.Parameters.AddWithValue("@customType", N(m.Invoice_customType));
             cmd.Parameters.AddWithValue("@udate", now);
             cmd.Parameters.AddWithValue("@uby", byUser ?? (object)DBNull.Value);
-
             if (isInsert)
             {
                 cmd.Parameters.AddWithValue("@cdate", (object)(m.createdate ?? now));
@@ -416,68 +422,83 @@ namespace techlink_workspace.Repositories.InvoiceRepo
         private static InvoiceModel Map(SqlDataReader r)
         {
             string S(string c) => r[c] == DBNull.Value ? null : r[c].ToString();
-            double? F(string c) => r[c] == DBNull.Value ? (double?)null : Convert.ToDouble(r[c]);
+            decimal? D(string c) => r[c] == DBNull.Value ? (decimal?)null : Convert.ToDecimal(r[c]);
             int? I(string c) => r[c] == DBNull.Value ? (int?)null : Convert.ToInt32(r[c]);
-            DateTime? D(string c) => r[c] == DBNull.Value ? (DateTime?)null : Convert.ToDateTime(r[c]);
+            DateTime? DT(string c) => r[c] == DBNull.Value ? (DateTime?)null : Convert.ToDateTime(r[c]);
+            bool? B(string c) => r[c] == DBNull.Value ? (bool?)null : Convert.ToBoolean(r[c]);
 
             return new InvoiceModel
             {
                 Invoice_Id = S("Invoice_Id"),
                 Invoice_no = S("Invoice_no"),
-                Invoice_erpID = S("Invoice_erpID"),
-                Invoice_erpInvoiceNo = S("Invoice_erpInvoiceNo"),
+                Invoice_customerCode = S("Invoice_customerCode"),
+                Invoice_customerName = S("Invoice_customerName"),
+                Invoice_customerRequestDate = DT("Invoice_customerRequestDate"),
+                Invoice_poNo = S("Invoice_poNo"),
+                Invoice_poDate = DT("Invoice_poDate"),
+                Invoice_brand = S("Invoice_brand"),
+                Invoice_saleName = S("Invoice_saleName"),
+                Invoice_factoryNo = S("Invoice_factoryNo"),
+                Invoice_factoryName = S("Invoice_factoryName"),
+                Invoice_itemCode = S("Invoice_itemCode"),
+                Invoice_itemCodeCustomers = S("Invoice_itemCodeCustomers"),
+                Invoice_itemName = S("Invoice_itemName"),
+                Invoice_quantity = D("Invoice_quantity"),
+                Invoice_unit = S("Invoice_unit"),
                 Invoice_shippingTerm = S("Invoice_shippingTerm"),
                 Invoice_paymentTerm = S("Invoice_paymentTerm"),
-                Invoice_employee = S("Invoice_employee"),
-                Invoice_logisticRemark = S("Invoice_logisticRemark"),
-                Invoice_confirmDate = D("Invoice_confirmDate"),
+                Invoice_logisticPersonInCharge = S("Invoice_logisticPersonInCharge"),
+                Invoice_logisticNote = S("Invoice_logisticNote"),
+                Invoice_factoryConfirmDate = DT("Invoice_factoryConfirmDate"),
+                Invoice_shippingStatus = I("Invoice_shippingStatus"),
                 Invoice_fwdName = S("Invoice_fwdName"),
                 Invoice_bookingNo = S("Invoice_bookingNo"),
                 Invoice_contType = S("Invoice_contType"),
                 Invoice_vgmCO = S("Invoice_vgmCO"),
                 Invoice_cyCO = S("Invoice_cyCO"),
-                Invoice_etd = D("Invoice_etd"),
-                Invoice_eta = D("Invoice_eta"),
+                Invoice_etd = DT("Invoice_etd"),
+                Invoice_eta = DT("Invoice_eta"),
                 Invoice_billType = S("Invoice_billType"),
                 Invoice_billNo = S("Invoice_billNo"),
-                Invoice_co = S("Invoice_co"),
+                Invoice_co = B("Invoice_co"),
                 Invoice_coNo = S("Invoice_coNo"),
-                Invoice_OF = F("Invoice_OF"),
-                Invoice_deliveryCharges = F("Invoice_deliveryCharges"),
-                Invoice_taxes = F("Invoice_taxes"),
-                Invoice_otherDestCharges = F("Invoice_otherDestCharges"),
-                Invoice_thc = F("Invoice_thc"),
-                Invoice_blFee = F("Invoice_blFee"),
-                Invoice_seal = F("Invoice_seal"),
-                Invoice_telexRelease = F("Invoice_telexRelease"),
-                Invoice_cfs = F("Invoice_cfs"),
-                Invoice_vgmFee = F("Invoice_vgmFee"),
-                Invoice_ensebsams = F("Invoice_ensebsams"),
-                Invoice_other = F("Invoice_other"),
-                Invoice_totalVND = F("Invoice_totalVND"),
-                Invoice_subTotalOcean = F("Invoice_subTotalOcean"),
-                Invoice_coFee = F("Invoice_coFee"),
+                Invoice_OF = D("Invoice_OF"),
+                Invoice_deliveryCharges = D("Invoice_deliveryCharges"),
+                Invoice_taxes = D("Invoice_taxes"),
+                Invoice_otherDestCharges = D("Invoice_otherDestCharges"),
+                Invoice_thc = D("Invoice_thc"),
+                Invoice_blFee = D("Invoice_blFee"),
+                Invoice_seal = D("Invoice_seal"),
+                Invoice_telexRelease = D("Invoice_telexRelease"),
+                Invoice_cfs = D("Invoice_cfs"),
+                Invoice_vgmFee = D("Invoice_vgmFee"),
+                Invoice_ensebsams = D("Invoice_ensebsams"),
+                Invoice_other = D("Invoice_other"),
+                Invoice_coFee = D("Invoice_coFee"),
+                Invoice_totalVND = D("Invoice_totalVND"),
+                Invoice_subTotalOcean = D("Invoice_subTotalOcean"),
                 Invoice_feeStatus = I("Invoice_feeStatus"),
                 Invoice_redInvoiceNo = S("Invoice_redInvoiceNo"),
-                Invoice_redInvoiceDate = D("Invoice_redInvoiceDate"),
-                Invoice_redInvoiceRecvDate = D("Invoice_redInvoiceRecvDate"),
-                Invoice_transferAccountantDate = D("Invoice_transferAccountantDate"),
-                Invoice_trucking = F("Invoice_trucking"),
-                Invoice_infrastructureFee = F("Invoice_infrastructureFee"),
-                Invoice_customerClearance = F("Invoice_customerClearance"),
-                Invoice_customFee = F("Invoice_customFee"),
-                Invoice_otherCustomFee = F("Invoice_otherCustomFee"),
-                Invoice_subTotalVNDCustom = F("Invoice_subTotalVNDCustom"),
-                Invoice_subTotalUSDCustom = F("Invoice_subTotalUSDCustom"),
-                Invoice_grandTotalVND = F("Invoice_grandTotalVND"),
-                Invoice_grandTotalUSD = F("Invoice_grandTotalUSD"),
+                Invoice_redInvoiceDate = DT("Invoice_redInvoiceDate"),
+                Invoice_redInvoiceRecvDate = DT("Invoice_redInvoiceRecvDate"),
+                Invoice_transferAccountantDate = DT("Invoice_transferAccountantDate"),
+                Invoice_trucking = D("Invoice_trucking"),
+                Invoice_infrastructureFee = D("Invoice_infrastructureFee"),
+                Invoice_customerClearance = D("Invoice_customerClearance"),
+                Invoice_customFee = D("Invoice_customFee"),
+                Invoice_otherCustomFee = D("Invoice_otherCustomFee"),
+                Invoice_subTotalVNDCustom = D("Invoice_subTotalVNDCustom"),
+                Invoice_subTotalUSDCustom = D("Invoice_subTotalUSDCustom"),
+                Invoice_grandTotalVND = D("Invoice_grandTotalVND"),
+                Invoice_grandTotalUSD = D("Invoice_grandTotalUSD"),
                 Invoice_cdsNo = S("Invoice_cdsNo"),
-                Invoice_cdsDate = D("Invoice_cdsDate"),
+                Invoice_cdsDate = DT("Invoice_cdsDate"),
+                Invoice_cdsApproved = B("Invoice_cdsApproved"),
                 Invoice_line = S("Invoice_line"),
                 Invoice_customType = S("Invoice_customType"),
-                createdate = D("createdate"),
+                createdate = DT("createdate"),
                 createby = S("createby"),
-                updatedate = D("updatedate"),
+                updatedate = DT("updatedate"),
                 updateby = S("updateby"),
             };
         }
